@@ -78,6 +78,30 @@ Tokenizer::Tokenizer(const std::string &filepath) {
     | magic(4B) | version(4B) | vocab_size(4B) | reserved(1012B) | token词表数据       |
     ----------------------------------------------------------------------------------
     ===================================== 作业 ===================================== */
+    std::ifstream ifs(filepath, std::ios::binary);
+    CHECK(ifs.is_open()) << "文件打开失败: " << filepath;
+
+    auto header = ReadSeveralBytesFromIfstream(1024, &ifs);
+    magic_number_ = BytesToType<uint32_t>(header, 0);
+    Version version = BytesToType<Version>(header, 4);
+    vocab_size_ = BytesToType<uint32_t>(header, 8);
+
+    if (version == Version::kV1) {
+        eot_token_ = kEotMap.at(magic_number_);
+    } else if (version == Version::kV2) {
+        eot_token_ = BytesToType<uint32_t>(header, 12);
+    } else {
+        LOG(FATAL) << "不支持的文件版本: " << static_cast<uint32_t>(version);
+        return;
+    }
+
+    token_table_.resize(vocab_size_);
+    // 第一个字节代表token长度，后续字节为token内容
+    for (uint32_t i = 0; i < vocab_size_; ++i) {
+        uint8_t token_len = ReadSeveralBytesFromIfstream(1, &ifs)[0];
+        auto token_bytes = ReadSeveralBytesFromIfstream(token_len, &ifs);
+        token_table_[i] = std::string(token_bytes.begin(), token_bytes.end());
+    }
 }
 
 std::string Tokenizer::Decode(uint32_t token_id) const {
@@ -85,7 +109,10 @@ std::string Tokenizer::Decode(uint32_t token_id) const {
     TODO：实现token_id到文本的转换
     功能描述：根据token_id返回对应的文本片段
     ===================================== 作业 ===================================== */
-    return "";
+    if (token_id >= vocab_size_) {
+        return "[INVALID_TOKEN]";
+    }
+    return token_table_[token_id];
 }
 
 void Tokenizer::GenerateText(infini_train::nn::Module &model, uint32_t batch_size, uint32_t sequence_length,
@@ -111,6 +138,20 @@ void Tokenizer::GenerateText(infini_train::nn::Module &model, uint32_t batch_siz
         TODO：实现单步文本生成逻辑
         HINT：调用model.Forward推理获取logits，根据推理结果进行随机采样，调用Decode获取文本结果
         ===================================== 作业 ===================================== */
+        auto input_tensor = std::make_shared<infini_train::Tensor>(x->To(device)); // 从CPU转到计算设备
+        auto model_output = model.Forward({input_tensor})[0];
+        auto probabilities_tensor = nn::function::Softmax(model_output, -1);
+        auto probabilities_cpu = probabilities_tensor->To(Device());
+        auto raw_data = probabilities_cpu.DataPtr();
+        auto vocabulary_size = model_output->Dims()[2];
+        float *prob_distribution = static_cast<float *>(raw_data) + t * vocabulary_size;
+        float random_value = RandomF32(kRngState);
+        int predicted_token = SampleMult(prob_distribution, vocabulary_size, random_value);
+
+        input_tensor = std::make_shared<infini_train::Tensor>(input_tensor->To(Device())); // 从计算设备转回CPU
+        auto tensor_data = static_cast<int64_t *>(input_tensor->DataPtr());
+        tensor_data[t] = predicted_token;
+        std::cout << Decode(predicted_token);
     }
     std::cout << std::endl;
 }

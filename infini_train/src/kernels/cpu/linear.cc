@@ -16,7 +16,42 @@ std::shared_ptr<Tensor> MatmulForward(const std::shared_ptr<Tensor> &input, cons
     // REF:
     // =================================== 作业 ===================================
 
-    auto output = std::make_shared<Tensor>();
+    const auto &input_dims = input->Dims();
+    const auto &other_dims = other->Dims();
+
+    CHECK_GE(input_dims.size(), 2);
+    CHECK_GE(other_dims.size(), 2);
+    CHECK_EQ(input_dims.back(), *(other_dims.rbegin() + 1));
+
+    // ..axb ..bxc
+    const auto a = *(input_dims.rbegin() + 1), b = input_dims.back(), c = other_dims.back();
+    auto output_dims = std::vector<int64_t>(input_dims);
+    *(output_dims.rbegin() + 1) = a;
+    *(output_dims.rbegin()) = c;
+    auto output = std::make_shared<Tensor>(output_dims, DataType::kFLOAT32);
+
+    int64_t size = 1;
+    for (int i = 0; i < input_dims.size() - 2; ++i) {
+        CHECK_EQ(input_dims[i], other_dims[i]);
+        size *= input_dims[i];
+    }
+
+    // 矩阵乘法
+    for (int i = 0; i < size; ++i) {
+        int offset1 = i * a * b;
+        int offset2 = i * b * c;
+        int offset3 = i * a * c;
+        for (int j = 0; j < a; ++j) {
+            for (int k = 0; k < c; ++k) {
+                float sum = 0;
+                for (int l = 0; l < b; ++l) {
+                    sum += static_cast<const float *>(input->DataPtr())[offset1 + j * b + l] *
+                        static_cast<const float *>(other->DataPtr())[offset2 + l * c + k];
+                }
+                static_cast<float *>(output->DataPtr())[offset3 + j * c + k] = sum;
+            }
+        }
+    }
     return {output};
 }
 
@@ -28,8 +63,63 @@ MatmulBackward(const std::shared_ptr<Tensor> &input, const std::shared_ptr<Tenso
     // REF:
     // =================================== 作业 ===================================
 
-    auto grad_input = std::make_shared<Tensor>();
-    auto grad_other = std::make_shared<Tensor>();
+    const auto &input_dims = input->Dims();
+    const auto &other_dims = other->Dims();
+    const auto &output_dims = grad_output->Dims();
+    CHECK_GE(input_dims.size(), 2);
+    CHECK_GE(other_dims.size(), 2);
+    CHECK_GE(output_dims.size(), 2);
+
+
+    auto grad_input = std::make_shared<Tensor>(input_dims, DataType::kFLOAT32);
+    auto grad_other = std::make_shared<Tensor>(other_dims, DataType::kFLOAT32);
+
+    // ..axb ..bxc
+    const auto a = *(input_dims.rbegin() + 1), b = input_dims.back(), c = other_dims.back();
+
+    int64_t size = 1;
+    for (int i = 0; i < input_dims.size() - 2; ++i) {
+        CHECK_EQ(input_dims[i], other_dims[i]);
+        size *= input_dims[i];
+    }
+
+    /*
+     * 二维时
+     * grad_input = grad_output * other^T
+     * grad_other = input^T * grad_output;
+     * 多维类似，注意细节
+     */
+    for (int i = 0; i < size; ++i) {
+        int offset1 = i * a * b;
+        int offset2 = i * b * c;
+        int offset3 = i * a * c;
+
+        // grad_input = grad_output * other^T
+        // axc cxb
+        for (int j = 0; j < a; ++j) {
+            for (int k = 0; k < b; ++k) {
+                float sum_input = 0;
+                for (int l = 0; l < c; ++l) {
+                    sum_input += static_cast<const float *>(grad_output->DataPtr())[offset3 + j * c + l] *
+                        static_cast<const float *>(other->DataPtr())[offset2 + k * c + l];
+                }
+                static_cast<float *>(grad_input->DataPtr())[offset1 + j * b + k] = sum_input;
+            }
+        }
+        // grad_other = input^T * grad_output;
+        // bxa axc
+        for (int j = 0; j < b; ++j) {
+            for (int k = 0; k < c; ++k) {
+                float sum_other = 0;
+                for (int l = 0; l < a; ++l) {
+                    sum_other += static_cast<const float *>(input->DataPtr())[offset1 + l * b + j] *
+                        static_cast<const float *>(grad_output->DataPtr())[offset3 + l * c + k];
+                }
+                static_cast<float *>(grad_other->DataPtr())[offset2 + j * c + k] = sum_other;
+            }
+        }
+    }
+
     return {grad_input, grad_other};
 }
 

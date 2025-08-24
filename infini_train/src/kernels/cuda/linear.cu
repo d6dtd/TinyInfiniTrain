@@ -29,7 +29,53 @@ std::shared_ptr<Tensor> MatmulForward(const std::shared_ptr<Tensor> &input, cons
     // REF:
     // =================================== 作业 ===================================
 
-    auto output = std::make_shared<Tensor>();
+    const auto &input_dims = input->Dims();
+    const auto &other_dims = other->Dims();
+    CHECK_GE(input_dims.size(), 2);
+    CHECK_GE(other_dims.size(), 2);
+
+    const int64_t M1 = input_dims[input_dims.size() - 2];
+    const int64_t N1 = input_dims[input_dims.size() - 1];
+    const int64_t M2 = other_dims[other_dims.size() - 2];
+    const int64_t N2 = other_dims[other_dims.size() - 1];
+
+    // M1 x N1 * M2 x N2 --> M1 x N2
+    CHECK(N1 == M2);
+
+    const int64_t size = std::accumulate(input_dims.rbegin() + 2, input_dims.rend(), 1, std::multiplies<int64_t>{});
+
+    auto output_dims = input_dims;
+    output_dims[output_dims.size() - 1] = N2;
+    auto output = std::make_shared<Tensor>(output_dims, DataType::kFLOAT32, input->GetDevice());
+    output->Fill<float>(0.0f);
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    std::vector<cudaStream_t> streams(size);
+    std::vector<cublasHandle_t> handles(size);
+
+    for (int i = 0; i < size; ++i) {
+        CUDA_CHECK(cudaStreamCreate(&streams[i]));
+        CUBLAS_CHECK(cublasCreate(&handles[i]));
+        CUBLAS_CHECK(cublasSetStream(handles[i], streams[i]));
+
+        // output = input * other --> output.T = other.T * input.T
+        // C = output.T[N2, M1]
+        // A = other.T[N2, M2]
+        // B = input.T[N1, M1]
+        CUBLAS_CHECK(cublasSgemm(handles[i], CUBLAS_OP_N, CUBLAS_OP_N, N2, M1, N1, &alpha,
+            static_cast<const float *>(other->DataPtr()) + i * N2 * M2, N2,
+            static_cast<const float *>(input->DataPtr()) + i * N1 * M1, N1,
+            &beta, static_cast<float *>(output->DataPtr()) + i * N2 * M1, N2));
+    }
+    // 等待所有 stream 完成
+    cudaDeviceSynchronize();
+
+    // 清理资源
+    for (int i = 0; i < size; ++i) {
+        CUBLAS_CHECK(cublasDestroy(handles[i]));
+        cudaStreamDestroy(streams[i]);
+    }
     return output;
 }
 
@@ -41,8 +87,65 @@ MatmulBackward(const std::shared_ptr<Tensor> &input, const std::shared_ptr<Tenso
     // REF:
     // =================================== 作业 ===================================
 
-    auto grad_input = std::make_shared<Tensor>();
-    auto grad_other = std::make_shared<Tensor>();
+    const auto &input_dims = input->Dims();
+    const auto &other_dims = other->Dims();
+    CHECK_GE(input_dims.size(), 2);
+    CHECK_GE(other_dims.size(), 2);
+
+    auto grad_input = std::make_shared<Tensor>(input_dims, DataType::kFLOAT32, input->GetDevice());
+    auto grad_other = std::make_shared<Tensor>(other_dims, DataType::kFLOAT32, other->GetDevice());
+    grad_input->Fill<float>(0.0f);
+    grad_other->Fill<float>(0.0f);
+
+    const int64_t M = input_dims[input_dims.size() - 2];
+    const int64_t K = input_dims[input_dims.size() - 1];
+    const int64_t N = other_dims[other_dims.size() - 1];
+
+    // M x K * K x N --> M x N
+    CHECK(K == other_dims[other_dims.size() - 2]);
+
+    const int64_t size = std::accumulate(input_dims.rbegin() + 2, input_dims.rend(), 1, std::multiplies<int64_t>{});
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    std::vector<cudaStream_t> streams(size);
+    std::vector<cublasHandle_t> handles(size);
+
+    for (int i = 0; i < size; ++i) {
+        CUDA_CHECK(cudaStreamCreate(&streams[i]));
+        CUBLAS_CHECK(cublasCreate(&handles[i]));
+        CUBLAS_CHECK(cublasSetStream(handles[i], streams[i]));
+
+        // grad_input = grad_output * other.T
+        // grad_input.T = other * grad_output.T
+        // C = grad_input.T[K, M]
+        // A = other.T[N, K]
+        // B = grad_output.T[N, M]
+
+        CUBLAS_CHECK(cublasSgemm(handles[i], CUBLAS_OP_T, CUBLAS_OP_N, K, M, N, &alpha,
+            static_cast<const float *>(other->DataPtr()) + i * N * K, N,
+            static_cast<const float *>(grad_output->DataPtr()) + i * N * M, N,
+            &beta, static_cast<float *>(grad_input->DataPtr()) + i * K * M, K));
+
+        // grad_other = input.T * grad_output
+        // grad_other.T = grad_output.T * input
+        // C = grad_other.T[N, K]
+        // A = grad_output.T[N, M]
+        // B = input.T[K, M]
+       CUBLAS_CHECK(cublasSgemm(handles[i], CUBLAS_OP_N, CUBLAS_OP_T, N, K, M, &alpha,
+            static_cast<const float *>(grad_output->DataPtr()) + i * N * M, N,
+            static_cast<const float *>(input->DataPtr()) + i * K * M, K,
+            &beta, static_cast<float *>(grad_other->DataPtr()) + i * N * K, N));
+    }
+    // 等待所有 stream 完成
+    cudaDeviceSynchronize();
+
+    // 清理资源
+    for (int i = 0; i < size; ++i) {
+        CUBLAS_CHECK(cublasDestroy(handles[i]));
+        cudaStreamDestroy(streams[i]);
+    }
+
     return {grad_input, grad_other};
 }
 

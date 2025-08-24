@@ -283,7 +283,22 @@ std::shared_ptr<Tensor> Tensor::Flatten(int64_t start, int64_t end) {
     // HINT:
     // =================================== 作业 ===================================
 
-    return std::make_shared<Tensor>();
+    if (end < 0) {
+        end += dims_.size();
+    }
+
+    const int dim = dims_.size() + start - end;
+    std::vector<int64_t> new_shape(dim);
+
+    for (int i = 0; i < dim; i++) {
+        if (i == start) {
+            new_shape[i] = std::accumulate(dims_.begin() + start, dims_.begin() + end + 1, 1, std::multiplies<int64_t>{});
+        } else {
+            new_shape[i] = dims_[i];
+        }
+    }
+
+    return Contiguous()->View(new_shape);
 }
 
 std::shared_ptr<Tensor> Tensor::Squeeze(int64_t dim) {
@@ -358,6 +373,14 @@ void Tensor::Backward(std::shared_ptr<Tensor> gradient, bool retain_graph, bool 
     // TODO：实现自动微分反向传播
     // 功能描述：1. 计算当前张量对叶子节点的梯度    2. 支持多输出场景的梯度累加
     // =================================== 作业 ===================================
+    if (grad_fn_) {
+        // 自己对自己的导数为1
+        if (!gradient) {
+            gradient = std::make_shared<Tensor>(dims_, dtype_, GetDevice());
+            gradient->Fill<float>(1.0f);
+        }
+        grad_fn()->BackwardPartial(gradient, output_idx_);
+    }
 }
 
 void Tensor::ZeroGrad() {
